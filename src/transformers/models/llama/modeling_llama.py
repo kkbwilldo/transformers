@@ -60,6 +60,7 @@ logger = logging.get_logger(__name__)
 
 _CONFIG_FOR_DOC = "LlamaConfig"
 
+import nvtx
 
 def _get_unpad_data(attention_mask):
     seqlens_in_batch = attention_mask.sum(dim=-1, dtype=torch.int32)
@@ -736,6 +737,7 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
+        id_self_attention = nvtx.start_range("Self Attention")
         hidden_states, self_attn_weights, present_key_value = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
@@ -746,13 +748,22 @@ class LlamaDecoderLayer(nn.Module):
             cache_position=cache_position,
             **kwargs,
         )
+        nvtx.end_range(id_self_attention)
+        id_residual_sum_1 = nvtx.start_range("Residual Sum")
         hidden_states = residual + hidden_states
+        nvtx.end_range(id_residual_sum_1)
 
         # Fully Connected
         residual = hidden_states
+        id_layer_norm = nvtx.start_range("Layer Norm")
         hidden_states = self.post_attention_layernorm(hidden_states)
+        nvtx.end_range(id_layer_norm)
+        id_mlp = nvtx.start_range("MLP")
         hidden_states = self.mlp(hidden_states)
+        nvtx.end_range(id_mlp)
+        id_residual_sum_2 = nvtx.start_range("Residual Sum")
         hidden_states = residual + hidden_states
+        nvtx.end_range(id_residual_sum_2)
 
         outputs = (hidden_states,)
 
@@ -997,7 +1008,7 @@ class LlamaModel(LlamaPreTrainedModel):
         all_self_attns = () if output_attentions else None
         next_decoder_cache = None
 
-        for decoder_layer in self.layers:
+        for idx, decoder_layer in enumerate(self.layers):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
@@ -1013,6 +1024,7 @@ class LlamaModel(LlamaPreTrainedModel):
                     cache_position,
                 )
             else:
+                id_decoder = nvtx.start_range(f"Decoding layer {idx}")
                 layer_outputs = decoder_layer(
                     hidden_states,
                     attention_mask=causal_mask,
@@ -1022,6 +1034,7 @@ class LlamaModel(LlamaPreTrainedModel):
                     use_cache=use_cache,
                     cache_position=cache_position,
                 )
+                nvtx.end_range(id_decoder)
 
             hidden_states = layer_outputs[0]
 
