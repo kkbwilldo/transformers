@@ -74,6 +74,9 @@ from pathlib import Path
 
 from setuptools import Command, find_packages, setup
 
+# for CUDA kernels
+from torch.utils.cpp_extension import BuildExtension, CUDAExtension
+
 
 # Remove stale transformers.egg-info directory to avoid https://github.com/pypa/pip/issues/5466
 stale_egg_info = Path(__file__).parent / "transformers.egg-info"
@@ -459,5 +462,15 @@ setup(
         "Programming Language :: Python :: 3.10",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
-    cmdclass={"deps_table_update": DepsTableUpdateCommand},
+    # my kernels
+    ext_modules=[
+        CUDAExtension(
+            name="kbkim_kernels",
+            sources=['cuda/fused_mlp.cu']
+        ),
+    ],
+    cmdclass={
+        "deps_table_update": DepsTableUpdateCommand,
+        "build_ext": BuildExtension,
+    },
 )

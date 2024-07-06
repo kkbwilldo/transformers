@@ -55,6 +55,9 @@ if is_flash_attn_2_available():
     from flash_attn import flash_attn_func, flash_attn_varlen_func
     from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
 
+# for fused kernels
+import kbkim_kernels
+
 
 logger = logging.get_logger(__name__)
 
@@ -209,7 +212,7 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
 
 
 class LlamaMLP(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, block_size=256):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
@@ -218,6 +221,7 @@ class LlamaMLP(nn.Module):
         self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
         self.act_fn = ACT2FN[config.hidden_act]
+        self.block_size = block_size # num_threads
 
     def forward(self, x):
         if self.config.pretraining_tp > 1:
@@ -237,7 +241,24 @@ class LlamaMLP(nn.Module):
             ]
             down_proj = sum(down_proj)
         else:
-            down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+            # down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+            
+            batch_size, seq_len, hidden_size = x.shape
+
+            down_proj = torch.zeros_like(x).cuda()            
+
+            kbkim_kernels.fused_mlp(
+                x,
+                self.gate_proj.weight.detach(),
+                self.up_proj.weight.detach(),
+                self.down_proj.weight.detach(),
+                down_proj,
+                batch_size,
+                seq_len,
+                hidden_size,
+                self.intermediate_size,
+                self.block_size,
+            )
 
         return down_proj
 
