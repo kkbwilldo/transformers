@@ -16,6 +16,15 @@ void fused_kernel(
     int hidden_size, 
     int intermediate_size) {
 
+    /* 
+    the original operations
+    
+    output = down_proj(
+        silu(gate_proj(input_tensor)) * up_proj(input_tensor)  <--- element-wise operation
+    )
+
+    */
+
     int batch_idx = blockIdx.x;
     int seq_idx = blockIdx.y;
     int hidden_idx = threadIdx.x;
@@ -43,21 +52,27 @@ void fused_kernel(
 }
 
 // Python에서 호출 가능한 인터페이스 함수
-void fused_mlp(
-    torch::Tensor x, 
-    torch::Tensor gate_proj_weights, 
-    torch::Tensor up_proj_weights, 
-    torch::Tensor down_proj_weights, 
-    torch::Tensor output, 
-    int batch_size, 
-    int seq_len, 
-    int hidden_size, 
-    int intermediate_size, 
+torch::Tensor fused_mlp(
+    torch::Tensor x,
+    torch::Tensor gate_proj_weights,
+    torch::Tensor up_proj_weights,
+    torch::Tensor down_proj_weights,
     int block_size) {
-    
+
+    // Tensor shape 확인 및 변수 설정
+    auto batch_size = x.size(0);
+    auto seq_len = x.size(1);
+    auto hidden_size = x.size(2);
+    auto intermediate_size = gate_proj_weights.size(0);
+
+    // 출력 텐서 생성
+    auto output = torch::zeros_like(x);
+
+    // 블록 및 그리드 크기 설정
     const dim3 blocks(batch_size, seq_len);
 
-    AT_DISPATCH_FLOATING_TYPES_AND(at::ScalarType::BFloat16, x.scalar_type(), "fused_mlp", ([&] {
+
+    AT_DISPATCH_FLOATING_TYPES_AND_HALF(x.scalar_type(), "fused_mlp", ([&] {
         fused_kernel<scalar_t><<<blocks, block_size>>>(
             x.data_ptr<scalar_t>(),
             gate_proj_weights.data_ptr<scalar_t>(),
@@ -67,9 +82,18 @@ void fused_mlp(
             batch_size, seq_len, hidden_size, intermediate_size
         );
     }));
+
+    // 출력 텐서 반환
+    return output;
 }
 
 // Python 모듈 초기화
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("fused_mlp", &fused_mlp, "Fused MLP kernel");
+    m.def("fused_mlp", &fused_mlp, "Fused MLP kernel",
+        pybind11::arg("x"),
+        pybind11::arg("gate_proj_weights"),
+        pybind11::arg("up_proj_weights"),
+        pybind11::arg("down_proj_weights"),
+        pybind11::arg("block_size")
+    );
 }

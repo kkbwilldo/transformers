@@ -241,24 +241,19 @@ class LlamaMLP(nn.Module):
             ]
             down_proj = sum(down_proj)
         else:
-            # down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+            origin_down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
             
-            batch_size, seq_len, hidden_size = x.shape
-
-            down_proj = torch.zeros_like(x).cuda()            
-
-            kbkim_kernels.fused_mlp(
+            down_proj = kbkim_kernels.fused_mlp(
                 x,
-                self.gate_proj.weight.detach(),
-                self.up_proj.weight.detach(),
-                self.down_proj.weight.detach(),
-                down_proj,
-                batch_size,
-                seq_len,
-                hidden_size,
-                self.intermediate_size,
+                self.gate_proj.weight,
+                self.up_proj.weight,
+                self.down_proj.weight,
                 self.block_size,
             )
+
+            are_close = torch.allclose(origin_down_proj, down_proj)
+            if not are_close:
+                breakpoint()
 
         return down_proj
 
