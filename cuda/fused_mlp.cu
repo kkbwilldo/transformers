@@ -1,95 +1,106 @@
 #include <torch/extension.h>
 #include <cuda_runtime.h>
+#include <tuple>
 #include <cmath>
+
+#define MIN(a,b) ((a)<(b)?(a):(b))
 
 // CUDA 커널 함수
 template <typename scalar_t>
 __global__
 void fused_kernel(
-    const scalar_t* __restrict__ x, 
+    const scalar_t* __restrict__ x,
     const scalar_t* __restrict__ gate_proj_weights,
-    const scalar_t* __restrict__ up_proj_weights, 
+    const scalar_t* __restrict__ up_proj_weights,
     const scalar_t* __restrict__ down_proj_weights,
-    scalar_t* __restrict__ output, 
-    int batch_size, 
-    int seq_len, 
-    int hidden_size, 
-    int intermediate_size) {
-
-    /* 
-    the original operations
-    
-    output = down_proj(
-        silu(gate_proj(input_tensor)) * up_proj(input_tensor)  <--- element-wise operation
-    )
-
-    */
-
+    scalar_t* __restrict__ output,
+    scalar_t* __restrict__ gate_proj_output,
+    scalar_t* __restrict__ up_proj_output,
+    scalar_t* __restrict__ intermediate_output,
+    int batch_size,
+    int seq_len,
+    int hidden_size,
+    int intermediate_size
+) {
     int batch_idx = blockIdx.x;
     int seq_idx = blockIdx.y;
-    int hidden_idx = threadIdx.x;
+    int inter_idx = threadIdx.x + blockIdx.z * blockDim.x;
 
-    if (hidden_idx < hidden_size) {
-        int input_idx = (batch_idx * seq_len + seq_idx) * hidden_size + hidden_idx;
+    if (inter_idx < intermediate_size) {
+        int input_offset = (batch_idx * seq_len + seq_idx) * hidden_size;
+        int intermediate_offset = (batch_idx * seq_len + seq_idx) * intermediate_size;
+
         scalar_t gate_proj_val = 0.0;
         scalar_t up_proj_val = 0.0;
 
-        for (int i = 0; i < intermediate_size; ++i) {
-            gate_proj_val += x[input_idx] * gate_proj_weights[hidden_idx * intermediate_size + i];
-            up_proj_val += x[input_idx] * up_proj_weights[hidden_idx * intermediate_size + i];
+        for (int i = 0; i < hidden_size; ++i) {
+            gate_proj_val += x[input_offset + i] * gate_proj_weights[inter_idx * hidden_size + i];
+            up_proj_val += x[input_offset + i] * up_proj_weights[inter_idx * hidden_size + i];
         }
 
-        // SiLU activation function
-        gate_proj_val = gate_proj_val / (1.0 + exp(-gate_proj_val));
+        // SiLU activation function: x * sigmoid(x)
+        scalar_t silu_gate = gate_proj_val / (1.0 + exp(-gate_proj_val)) * gate_proj_val;
 
+        // Store intermediate results
+        gate_proj_output[intermediate_offset + inter_idx] = gate_proj_val;
+        up_proj_output[intermediate_offset + inter_idx] = up_proj_val;
+        
+        scalar_t intermediate = silu_gate * up_proj_val;
+        intermediate_output[intermediate_offset + inter_idx] = intermediate;
+
+        // Compute final output
         scalar_t down_proj_val = 0.0;
-        for (int i = 0; i < intermediate_size; ++i) {
-            down_proj_val += gate_proj_val * up_proj_val * down_proj_weights[i * hidden_size + hidden_idx];
+        for (int i = 0; i < hidden_size; ++i) {
+            down_proj_val += intermediate * down_proj_weights[i * intermediate_size + inter_idx];
         }
 
-        output[input_idx] = down_proj_val;
+        output[input_offset + (inter_idx%hidden_size)] = down_proj_val;
+        gate_proj_output[intermediate_offset + inter_idx] = gate_proj_val;
+        up_proj_output[intermediate_offset + inter_idx] = up_proj_val;
+        intermediate_output[intermediate_offset + inter_idx] = intermediate;
+
+        if(inter_idx < hidden_size){
+            output[input_offset + inter_idx] = down_proj_val;
+        }
     }
 }
 
-// Python에서 호출 가능한 인터페이스 함수
-torch::Tensor fused_mlp(
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> fused_mlp(
     torch::Tensor x,
     torch::Tensor gate_proj_weights,
     torch::Tensor up_proj_weights,
     torch::Tensor down_proj_weights,
-    int block_size) {
-
-    // Tensor shape 확인 및 변수 설정
+    int block_size
+) {
     auto batch_size = x.size(0);
     auto seq_len = x.size(1);
     auto hidden_size = x.size(2);
     auto intermediate_size = gate_proj_weights.size(0);
 
-    // 출력 텐서 생성
     auto output = torch::zeros_like(x);
+    auto gate_proj_output = torch::zeros({batch_size, seq_len, intermediate_size}, x.options());
+    auto up_proj_output = torch::zeros({batch_size, seq_len, intermediate_size}, x.options());
+    auto intermediate_output = torch::zeros({batch_size, seq_len, intermediate_size}, x.options());
 
-    // 블록 및 그리드 크기 설정
-    const dim3 blocks(batch_size, seq_len);
+    const int threads = 256;  // 또는 다른 적절한 값
+    const int blocks_z = (intermediate_size + threads - 1) / threads;
+    const dim3 blocks(batch_size, seq_len, blocks_z);
 
-    // dispatch 참고
-    // https://github.com/pytorch/pytorch/blob/010009e6421e9ef7d4af549527594af954c3c84c/aten/src/ATen/Dispatch.h#L286
-    AT_DISPATCH_FLOATING_TYPES_AND2(
-        at::ScalarType::Half,
-        at::ScalarType::BFloat16,
-        x.scalar_type(),
-        "fused_mlp", ([&] {
-            fused_kernel<scalar_t><<<blocks, block_size>>>(
-                x.data_ptr<scalar_t>(),
-                gate_proj_weights.data_ptr<scalar_t>(),
-                up_proj_weights.data_ptr<scalar_t>(),
-                down_proj_weights.data_ptr<scalar_t>(),
-                output.data_ptr<scalar_t>(),
-                batch_size, seq_len, hidden_size, intermediate_size
-            );
+    AT_DISPATCH_FLOATING_TYPES_AND2(at::ScalarType::Half, at::ScalarType::BFloat16, x.scalar_type(), "fused_mlp", ([&] {
+        fused_kernel<scalar_t><<<blocks, threads>>>(
+            x.data_ptr<scalar_t>(),
+            gate_proj_weights.data_ptr<scalar_t>(),
+            up_proj_weights.data_ptr<scalar_t>(),
+            down_proj_weights.data_ptr<scalar_t>(),
+            output.data_ptr<scalar_t>(),
+            gate_proj_output.data_ptr<scalar_t>(),
+            up_proj_output.data_ptr<scalar_t>(),
+            intermediate_output.data_ptr<scalar_t>(),
+            batch_size, seq_len, hidden_size, intermediate_size
+        );
     }));
 
-    // 출력 텐서 반환
-    return output;
+    return std::make_tuple(output, gate_proj_output, up_proj_output, intermediate_output);
 }
 
 // Python 모듈 초기화
