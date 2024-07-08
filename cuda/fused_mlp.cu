@@ -71,16 +71,21 @@ torch::Tensor fused_mlp(
     // 블록 및 그리드 크기 설정
     const dim3 blocks(batch_size, seq_len);
 
-
-    AT_DISPATCH_FLOATING_TYPES_AND_HALF(x.scalar_type(), "fused_mlp", ([&] {
-        fused_kernel<scalar_t><<<blocks, block_size>>>(
-            x.data_ptr<scalar_t>(),
-            gate_proj_weights.data_ptr<scalar_t>(),
-            up_proj_weights.data_ptr<scalar_t>(),
-            down_proj_weights.data_ptr<scalar_t>(),
-            output.data_ptr<scalar_t>(),
-            batch_size, seq_len, hidden_size, intermediate_size
-        );
+    // dispatch 참고
+    // https://github.com/pytorch/pytorch/blob/010009e6421e9ef7d4af549527594af954c3c84c/aten/src/ATen/Dispatch.h#L286
+    AT_DISPATCH_FLOATING_TYPES_AND2(
+        at::ScalarType::Half,
+        at::ScalarType::BFloat16,
+        x.scalar_type(),
+        "fused_mlp", ([&] {
+            fused_kernel<scalar_t><<<blocks, block_size>>>(
+                x.data_ptr<scalar_t>(),
+                gate_proj_weights.data_ptr<scalar_t>(),
+                up_proj_weights.data_ptr<scalar_t>(),
+                down_proj_weights.data_ptr<scalar_t>(),
+                output.data_ptr<scalar_t>(),
+                batch_size, seq_len, hidden_size, intermediate_size
+            );
     }));
 
     // 출력 텐서 반환
