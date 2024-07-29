@@ -21,6 +21,8 @@ if is_accelerate_available():
 
 logger = logging.get_logger(__name__)
 
+from modules import Linear4bit as kbkim_Linear4bit
+
 
 def set_module_quantized_tensor_to_device(module, tensor_name, device, value=None, quantized_stats=None):
     """
@@ -182,10 +184,10 @@ def _replace_with_bnb_linear(
                         else:
                             extra_kwargs = (
                                 {"quant_storage": quantization_config.bnb_4bit_quant_storage}
-                                if "quant_storage" in list(signature(bnb.nn.Linear4bit).parameters)
+                                if "quant_storage" in list(signature(kbkim_Linear4bit).parameters)
                                 else {}
                             )
-                            model._modules[name] = bnb.nn.Linear4bit(
+                            model._modules[name] = kbkim_Linear4bit(
                                 in_features,
                                 out_features,
                                 module.bias is not None,
