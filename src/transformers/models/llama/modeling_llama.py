@@ -50,6 +50,8 @@ from ...utils import (
 )
 from .configuration_llama import LlamaConfig
 
+from src.transformers.triton.rope import kbkim_apply_rotary_pos_emb
+
 
 if is_flash_attn_2_available():
     from flash_attn import flash_attn_func, flash_attn_varlen_func
@@ -643,6 +645,9 @@ class LlamaSdpaAttention(LlamaAttention):
 
         cos, sin = self.rotary_emb(value_states, position_ids)
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        kbkim_query_states, kbkim_key_states = kbkim_apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        breakpoint()
+
 
         # In case static cache is used, it is an instance attribute.
         past_key_value = getattr(self, "past_key_value", past_key_value)
